@@ -110,14 +110,18 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/classes /tmp/dex
 
-          # Collect sources into an explicit list. A bare $(find ...) inside the
-          # command line hides javac's exit status and silently lets a partial
-          # compile through — which is how MainActivity.class went missing while
-          # d8 still dexed the generated R classes and exited 0.
-          find src /tmp/gen -name '*.java' | sort > /tmp/sources.txt
+          # The activity lives at app/src/... — resolve from the repo root and
+          # assert the file is actually seen. v1.0.2 shipped without the class
+          # because this path was wrong and nothing verified the result.
+          APP_SRC="app/src"
+          if [ ! -d "$APP_SRC" ]; then
+            echo "expected sources at $APP_SRC — layout mismatch"; ls -la; exit 1
+          fi
+          find "$APP_SRC" /tmp/gen -name '*.java' | sort > /tmp/sources.txt
           echo "--- java sources ---"
           cat /tmp/sources.txt
-          test -s /tmp/sources.txt || { echo "no java sources found"; exit 1; }
+          grep -q 'MainActivity.java' /tmp/sources.txt \
+            || { echo "MainActivity.java not in source list"; exit 1; }
 
           javac -source 8 -target 8 \
             -bootclasspath "$android_jar" \
