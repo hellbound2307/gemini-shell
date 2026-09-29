@@ -144,15 +144,35 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/classes /tmp/dex
+
+          # Collect sources into an explicit list. A bare $(find ...) inside the
+          # command line hides javac's exit status and silently lets a partial
+          # compile through — which is how MainActivity.class went missing while
+          # d8 still dexed the generated R classes and exited 0.
+          find src /tmp/gen -name '*.java' | sort > /tmp/sources.txt
+          echo "--- java sources ---"
+          cat /tmp/sources.txt
+          test -s /tmp/sources.txt || { echo "no java sources found"; exit 1; }
+
           javac -source 8 -target 8 \
             -bootclasspath "$android_jar" \
             -classpath "libs/browser.jar" \
             -d /tmp/classes \
             -Xlint:-options \
-            $(find src /tmp/gen -name '*.java')
+            @/tmp/sources.txt
+
+          echo "--- compiled classes ---"
+          find /tmp/classes -name '*.class' | sort
+          # Fail loudly if the activity itself did not compile.
+          test -f /tmp/classes/com/geminishell/app/MainActivity.class \
+            || { echo "MainActivity.class was not produced"; exit 1; }
+
+          find /tmp/classes -name '*.class' | sort > /tmp/classes.txt
           "$build_tools/d8" --min-api 23 --lib "$android_jar" \
             --output /tmp/dex \
-            $(find /tmp/classes -name '*.class') libs/browser.jar
+            @/tmp/classes.txt libs/browser.jar
+
+          test -f /tmp/dex/classes.dex || { echo "d8 produced no classes.dex"; exit 1; }
           ( cd /tmp/dex && zip -q -X /tmp/base.apk classes.dex )
           unzip -l /tmp/base.apk
 
@@ -168,6 +188,14 @@ jobs:
           "$build_tools/apksigner" verify --print-certs /tmp/gemini-shell.apk
           sha256sum /tmp/gemini-shell.apk
           ls -la /tmp/gemini-shell.apk
+
+      # --------------------------------------------------------------
+      # Crash gate. v1.0.2 shipped a manifest that named MainActivity while
+      # the dex contained only the generated R classes, so the app died in
+      # ClassNotFoundException before onCreate. Nothing checked. This does.
+      # --------------------------------------------------------------
+      - name: Verify APK will not crash on launch
+        run: python3 tools/verify_apk.py /tmp/gemini-shell.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
