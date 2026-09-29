@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark, chrome-less splash so the handoff to Chrome is visually seamless.
+         Uses the platform theme only: no AppCompat/Material dependency. -->
+    <style name="ShellTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/shell_surface</item>
+        <item name="android:statusBarColor">@color/shell_surface</item>
+        <item name="android:navigationBarColor">@color/shell_surface</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

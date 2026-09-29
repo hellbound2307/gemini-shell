@@ -1,0 +1,116 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android build-tools (no Gradle)
+        run: |
+          set -euo pipefail
+          BT=34.0.0
+          SDK=/usr/local/lib/android/sdk
+          if [ ! -d "$SDK/build-tools/$BT" ]; then SDK="$ANDROID_SDK_ROOT"; fi
+          echo "SDK=$SDK"
+          echo "android_sdk=$SDK" >> "$GITHUB_ENV"
+          ls "$SDK/build-tools" || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install \
+            "build-tools;$BT" "platforms;android-34" > /dev/null
+          "$SDK/build-tools/$BT/aapt2" version
+
+      - name: Fetch androidx.browser (Custom Tabs only)
+        run: |
+          set -euo pipefail
+          mkdir -p libs
+          # androidx.browser provides CustomTabsIntent. Pull the AAR and extract
+          # classes.jar; no Gradle, no transitive resolution needed for a
+          # dependency that itself has no transitive deps.
+          curl -sSL -o libs/browser.aar \
+            "https://dl.google.com/dl/android/maven2/androidx/browser/browser/1.8.0/browser-1.8.0.aar"
+          curl -sSL -o libs/annotation.aar \
+            "https://dl.google.com/dl/android/maven2/androidx/annotation/annotation/1.7.1/annotation-1.7.1.jar" || true
+          cd libs && unzip -o -q browser.aar classes.jar && mv classes.jar browser.jar
+          unzip -o -q annotation.aar 2>/dev/null || cp annotation.aar annotation.jar 2>/dev/null || true
+          ls -la
+
+      - name: Compile resources with aapt2
+        run: |
+          set -euo pipefail
+          BT="$android_sdk/build-tools/34.0.0"
+          cd app
+          "$BT/aapt2" compile --dir res -o /tmp/res.zip
+          "$BT/aapt2" link \
+            -o /tmp/base.apk \
+            -I "$android_sdk/platforms/android-34/android.jar" \
+            --manifest AndroidManifest.xml \
+            --java /tmp/gen \
+            --min-sdk-version 23 \
+            --target-sdk-version 34 \
+            --version-code 1 --version-name 1.0 \
+            /tmp/res.zip
+
+      - name: Compile Java and dex
+        run: |
+          set -euo pipefail
+          BT="$android_sdk/build-tools/34.0.0"
+          mkdir -p /tmp/classes
+          javac -source 8 -target 8 \
+            -bootclasspath "$android_sdk/platforms/android-34/android.jar" \
+            -classpath "libs/browser.jar" \
+            -d /tmp/classes \
+            -Xlint:-options \
+            $(find src /tmp/gen -name '*.java')
+          "$BT/d8" --min-api 23 --lib "$android_sdk/platforms/android-34/android.jar" \
+            --output /tmp/dex \
+            $(find /tmp/classes -name '*.class') libs/browser.jar
+          cd /tmp/dex && zip -q -X /tmp/base.apk classes.dex
+          echo "--- APK contents ---"
+          unzip -l /tmp/base.apk | tail -20
+
+      - name: Zipalign and sign
+        run: |
+          set -euo pipefail
+          BT="$android_sdk/build-tools/34.0.0"
+          keytool -genkeypair -v -keystore /tmp/ks.jks -storepass android \
+            -keypass android -alias shell -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname "CN=Gemini Shell, O=local, C=DZ"
+          "$BT/zipalign" -f -p 4 /tmp/base.apk /tmp/aligned.apk
+          "$BT/apksigner" sign --ks /tmp/ks.jks --ks-pass pass:android \
+            --key-pass pass:android --out /tmp/gemini-shell.apk /tmp/aligned.apk
+          "$BT/apksigner" verify --print-certs /tmp/gemini-shell.apk
+          ls -la /tmp/gemini-shell.apk
+          echo "apk_path=/tmp/gemini-shell.apk" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-shell-apk
+          path: /tmp/gemini-shell.apk
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v1.0.${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" /tmp/gemini-shell.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Gemini Shell $TAG" \
+            --notes "Custom Tabs launcher for gemini.google.com. No WebView, no ads, INTERNET permission only." \
+          || gh release upload "$TAG" /tmp/gemini-shell.apk --repo "$GITHUB_REPOSITORY" --clobber
