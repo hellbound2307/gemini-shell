@@ -161,10 +161,13 @@ jobs:
       # --------------------------------------------------------------
       # Crash gate. v1.0.2 shipped a manifest that named MainActivity while
       # the dex contained only the generated R classes, so the app died in
-      # ClassNotFoundException before onCreate. Nothing checked. This does.
+      # ClassNotFoundException before onCreate. Nothing checked. v1.0.6's
+      # gate only knew that one class name and passed a still-broken APK.
+      # This one checks every declared component plus every Custom Tabs type
+      # the activity calls, against the plaintext manifest.
       # --------------------------------------------------------------
       - name: Verify APK will not crash on launch
-        run: python3 tools/verify_apk.py /tmp/gemini-shell.apk
+        run: python3 tools/verify_apk.py /tmp/gemini-shell.apk app/AndroidManifest.xml
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -182,5 +185,5 @@ jobs:
           gh release create "$TAG" /tmp/gemini-shell.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Gemini Shell $TAG" \
-            --notes "Custom Tabs launcher for gemini.google.com. No WebView, no ads, INTERNET permission only." \
+            --notes "Custom Tabs launcher for gemini.google.com. No WebView, no ads, INTERNET permission only. NOTE: each build uses a freshly generated signing key, so UNINSTALL any previous version before installing." \
           || gh release upload "$TAG" /tmp/gemini-shell.apk --repo "$GITHUB_REPOSITORY" --clobber

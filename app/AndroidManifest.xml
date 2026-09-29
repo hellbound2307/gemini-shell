@@ -31,5 +31,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Diagnostic surface: renders the uncaught exception on screen and
+             copies it to the clipboard. Not launchable, not exported. -->
+        <activity
+            android:name="com.geminishell.app.CrashActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.DeviceDefault" />
     </application>
 </manifest>

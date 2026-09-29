@@ -48,14 +48,24 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Install the trap FIRST, before any other code can fail. Everything
+        // below this line is then observable instead of a silent instant exit.
+        CrashTrap.install(this);
+
         super.onCreate(savedInstanceState);
 
-        // Warm up Chrome in the background so the tab opens without a cold-start
-        // flash. Best-effort: never blocks or breaks the launch path.
-        warmUp();
+        try {
+            // Warm up Chrome in the background so the tab opens without a
+            // cold-start flash. Best-effort: never blocks the launch path.
+            warmUp();
 
-        // Only ever launch the Gemini entry point; ignore stray intents.
-        launch(TARGET_URL);
+            // Only ever launch the Gemini entry point; ignore stray intents.
+            launch(TARGET_URL);
+        } catch (Throwable t) {
+            // A failure this early is exactly the class of bug that was
+            // unobservable on v1.0.2/1.0.6. Surface it instead of dying.
+            CrashTrap.report(this, t);
+        }
     }
 
     @Override
