@@ -179,25 +179,28 @@ jobs:
           sha256sum /tmp/gemini-shell.apk
           ls -la /tmp/gemini-shell.apk
 
-      # --------------------------------------------------------------
-      # Crash gate. v1.0.2 shipped a manifest that named MainActivity while
-      # the dex contained only the generated R classes, so the app died in
-      # ClassNotFoundException before onCreate. Nothing checked. v1.0.6's
-      # gate only knew that one class name and passed a still-broken APK.
-      # This one checks every declared component plus every Custom Tabs type
-      # the activity calls, against the plaintext manifest.
-      # --------------------------------------------------------------
-      - name: Verify APK will not crash on launch
-        run: python3 tools/verify_apk.py /tmp/gemini-shell.apk app/AndroidManifest.xml
-
+      # Artifact first, gate second, and the upload runs even when the gate
+      # fails. A gate that hides the artifact it rejected makes every
+      # diagnosis a round-trip through guesswork.
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gemini-shell-apk
           path: /tmp/gemini-shell.apk
 
+      # --------------------------------------------------------------
+      # Crash gate. The real invariant is dex type closure: no referenced
+      # type may be undefined. See tools/verify_apk.py for the full history
+      # of what the previous, weaker gates let through.
+      # --------------------------------------------------------------
+      - name: Verify APK will not crash on launch
+        run: python3 tools/verify_apk.py /tmp/gemini-shell.apk app/AndroidManifest.xml
+
       - name: Publish release
-        if: github.ref == 'refs/heads/main'
+        # success() must be explicit: an `if:` expression replaces the implicit
+        # success() gate, so without it a FAILED gate would still publish.
+        if: success() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

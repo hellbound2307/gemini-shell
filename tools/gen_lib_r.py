@@ -82,9 +82,13 @@ def main(argv):
             f.write('    private R() {}\n')
             n = 0x7f000000
             for kind in sorted(fields):
-                cls = 'R$%s' % kind
-                f.write('    public static final class %s {\n' % cls)
-                f.write('        private %s() {}\n' % cls)
+                # Nested class name is just the kind. The binary name
+                # androidx.browser.R$color comes from nesting `color` inside
+                # `R`. Writing `class R$color` here produced a class literally
+                # named R$R$color, which is why the dex ended up referencing
+                # R$color types it did not define.
+                f.write('    public static final class %s {\n' % kind)
+                f.write('        private %s() {}\n' % kind)
                 for name in sorted(set(fields[kind])):
                     n += 1
                     f.write('        public static final int %s = 0x%08x;\n'
