@@ -68,19 +68,39 @@ jobs:
           ls -la "$build_tools" | grep -E 'aapt2|d8|zipalign|apksigner'
           test -f "$android_jar" && echo "android.jar OK: $android_jar"
 
-      - name: Fetch androidx.browser (Custom Tabs only)
+      # ------------------------------------------------------------------
+      # Dependency closure.
+      #
+      # This step used to be a single hard-coded curl of browser-1.8.0.aar with
+      # a comment asserting "androidx.browser has no transitive deps". That
+      # assertion was false, and it shipped in v1.0.2 through v1.0.7. Every
+      # one of those APKs died on launch with:
+      #
+      #   NoClassDefFoundError: Failed resolution of:
+      #       Landroidx/core/app/ActivityOptionsCompat;
+      #
+      # androidx.browser declares androidx.core as an api dependency, and
+      # androidx.core pulls in annotation, collection, concurrent-futures,
+      # interpolator, versionedparcelable and lifecycle. 22 referenced types
+      # were missing from the dex.
+      #
+      # No assumption now: walk the POMs, pin a floor version, allowlist the
+      # groups, and let tools/verify_apk.py prove the closure is complete.
+      # ------------------------------------------------------------------
+      - name: Resolve and fetch the androidx.browser dependency closure
         run: |
           set -euo pipefail
-          mkdir -p libs
-          # androidx.browser has no transitive deps, so the AAR's classes.jar
-          # can be used directly. No Gradle, no Maven resolution.
-          curl -sSL -o libs/browser.aar \
-            "https://dl.google.com/dl/android/maven2/androidx/browser/browser/1.8.0/browser-1.8.0.aar"
-          cd libs
-          unzip -o -q browser.aar classes.jar
-          mv classes.jar browser.jar
-          unzip -l browser.jar | grep -c '\.class' | xargs echo "browser.jar class count:"
-          ls -la
+          python3 tools/fetch_deps.py libs
+          echo "--- closure.txt ---"
+          cat libs/closure.txt
+
+      - name: Generate library R classes
+        run: |
+          set -euo pipefail
+          # AARs do not ship R.class; Gradle generates it and rewrites library
+          # references. There is no AGP here, so reconstruct it from R.txt.
+          python3 tools/gen_lib_r.py /tmp/genlib libs
+          find /tmp/genlib -name '*.java' | sort
 
       - name: Compile resources
         run: |
@@ -117,15 +137,16 @@ jobs:
           if [ ! -d "$APP_SRC" ]; then
             echo "expected sources at $APP_SRC — layout mismatch"; ls -la; exit 1
           fi
-          find "$APP_SRC" /tmp/gen -name '*.java' | sort > /tmp/sources.txt
+          find "$APP_SRC" /tmp/gen /tmp/genlib -name '*.java' | sort > /tmp/sources.txt
           echo "--- java sources ---"
           cat /tmp/sources.txt
           grep -q 'MainActivity.java' /tmp/sources.txt \
             || { echo "MainActivity.java not in source list"; exit 1; }
 
+          # libs/* carries the whole resolved closure, not just browser.
           javac -source 8 -target 8 \
             -bootclasspath "$android_jar" \
-            -classpath "libs/browser.jar" \
+            -classpath "libs/*" \
             -d /tmp/classes \
             -Xlint:-options \
             @/tmp/sources.txt
@@ -139,7 +160,7 @@ jobs:
           find /tmp/classes -name '*.class' | sort > /tmp/classes.txt
           "$build_tools/d8" --min-api 23 --lib "$android_jar" \
             --output /tmp/dex \
-            @/tmp/classes.txt libs/browser.jar
+            @/tmp/classes.txt libs/*.jar
 
           test -f /tmp/dex/classes.dex || { echo "d8 produced no classes.dex"; exit 1; }
           ( cd /tmp/dex && zip -q -X /tmp/base.apk classes.dex )
