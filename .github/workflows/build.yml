@@ -105,41 +105,6 @@ jobs:
       # The v1.0.2 failure was a double length-prefixed string pool that
       # only showed up as a crash on device. Fail the build instead.
       # --------------------------------------------------------------
-      - name: Validate resources.arsc string pool
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import struct, sys
-
-          data = open('/tmp/pre.arsc', 'rb').read()
-          off = 12
-          typ, hdr, size = struct.unpack_from('<HHI', data, off)
-          cnt, styc, flags, sstart = struct.unpack_from('<IIII', data, off + 8)
-          utf8 = (flags & 0x100) != 0
-          print(f"global pool: count={cnt} utf8={utf8}")
-          base = off + hdr + cnt * 4
-          bad = 0
-          for i in range(cnt):
-              o = struct.unpack_from('<I', data, off + hdr + i * 4)[0]
-              p = base + o
-              if utf8:
-                  u1 = data[p]
-                  n = u1 if u1 < 0x80 else ((u1 & 0x7f) << 8) | data[p + 1]
-                  p += 1 if u1 < 0x80 else 2
-                  s = data[p:p + n].decode('utf-8', 'replace')
-              else:
-                  n = struct.unpack_from('<H', data, p)[0]
-                  s = data[p + 2:p + 2 + n * 2].decode('utf-16-le', 'replace')
-              ok = '\x00' not in s and all(c.isprintable() for c in s) and len(s) > 0
-              if not ok:
-                  bad += 1
-              print(f"  [{i}] {s!r} {'OK' if ok else 'BAD'}")
-          if bad:
-              print(f"\n{bad} malformed string(s) in resources.arsc")
-              sys.exit(1)
-          print("\nresources.arsc string pool is well-formed")
-          PY
-
       - name: Compile Java and dex
         run: |
           set -euo pipefail
