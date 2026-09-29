@@ -20,81 +20,154 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android build-tools (no Gradle)
+      # ------------------------------------------------------------------
+      # Pin ONE SDK. The runner image already ships cmdline-tools, a platform
+      # and build-tools. Installing a second build-tools version and mixing
+      # aapt2/d8/zipalign/apksigner across the two is how you end up with a
+      # corrupt resources.arsc (double length-prefixed strings). So: use the
+      # image SDK, install only what is missing, and assert every tool comes
+      # from the same directory.
+      # ------------------------------------------------------------------
+      - name: Resolve and pin Android SDK
         run: |
           set -euo pipefail
-          BT=34.0.0
-          SDK=/usr/local/lib/android/sdk
-          if [ ! -d "$SDK/build-tools/$BT" ]; then SDK="$ANDROID_SDK_ROOT"; fi
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           echo "SDK=$SDK"
-          echo "android_sdk=$SDK" >> "$GITHUB_ENV"
-          ls "$SDK/build-tools" || true
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install \
-            "build-tools;$BT" "platforms;android-34" > /dev/null
-          "$SDK/build-tools/$BT/aapt2" version
+          test -d "$SDK" || { echo "no SDK at $SDK"; exit 1; }
+
+          # Pick the build-tools version already present; only install if none.
+          BT_VER="$(ls "$SDK/build-tools" 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${BT_VER:-}" ]; then
+            echo "no build-tools present; installing"
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;34.0.0" > /dev/null
+            BT_VER="$(ls "$SDK/build-tools" | sort -V | tail -1)"
+          fi
+          echo "Using build-tools $BT_VER"
+
+          PLATFORM="$(ls "$SDK/platforms" 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${PLATFORM:-}" ]; then
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" > /dev/null
+            PLATFORM="$(ls "$SDK/platforms" | sort -V | tail -1)"
+          fi
+          echo "Using platform $PLATFORM"
+
+          {
+            echo "android_sdk=$SDK"
+            echo "build_tools=$SDK/build-tools/$BT_VER"
+            echo "android_jar=$SDK/platforms/$PLATFORM/android.jar"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify toolchain coherence
+        run: |
+          set -euo pipefail
+          for t in aapt2 d8 zipalign apksigner; do
+            printf '%-10s %s\n' "$t" "$("$build_tools/$t" --version 2>&1 | head -1)"
+          done
+          # Every binary must live in the same pinned directory.
+          ls -la "$build_tools" | grep -E 'aapt2|d8|zipalign|apksigner'
+          test -f "$android_jar" && echo "android.jar OK: $android_jar"
 
       - name: Fetch androidx.browser (Custom Tabs only)
         run: |
           set -euo pipefail
           mkdir -p libs
-          # androidx.browser provides CustomTabsIntent. Pull the AAR and extract
-          # classes.jar; no Gradle, no transitive resolution needed for a
-          # dependency that itself has no transitive deps.
+          # androidx.browser has no transitive deps, so the AAR's classes.jar
+          # can be used directly. No Gradle, no Maven resolution.
           curl -sSL -o libs/browser.aar \
             "https://dl.google.com/dl/android/maven2/androidx/browser/browser/1.8.0/browser-1.8.0.aar"
-          curl -sSL -o libs/annotation.aar \
-            "https://dl.google.com/dl/android/maven2/androidx/annotation/annotation/1.7.1/annotation-1.7.1.jar" || true
-          cd libs && unzip -o -q browser.aar classes.jar && mv classes.jar browser.jar
-          unzip -o -q annotation.aar 2>/dev/null || cp annotation.aar annotation.jar 2>/dev/null || true
+          cd libs
+          unzip -o -q browser.aar classes.jar
+          mv classes.jar browser.jar
+          unzip -l browser.jar | grep -c '\.class' | xargs echo "browser.jar class count:"
           ls -la
 
-      - name: Compile resources with aapt2
+      - name: Compile resources
         run: |
           set -euo pipefail
-          BT="$android_sdk/build-tools/34.0.0"
           cd app
-          "$BT/aapt2" compile --dir res -o /tmp/res.zip
-          "$BT/aapt2" link \
+          "$build_tools/aapt2" compile --dir res -o /tmp/res.zip
+          "$build_tools/aapt2" link \
             -o /tmp/base.apk \
-            -I "$android_sdk/platforms/android-34/android.jar" \
+            -I "$android_jar" \
             --manifest AndroidManifest.xml \
             --java /tmp/gen \
             --min-sdk-version 23 \
             --target-sdk-version 34 \
             --version-code 1 --version-name 1.0 \
             /tmp/res.zip
+          echo "--- resources.arsc after link ---"
+          unzip -p /tmp/base.apk resources.arsc > /tmp/pre.arsc
+          ls -la /tmp/pre.arsc
+
+      # --------------------------------------------------------------
+      # Gate: the resource table must decode cleanly BEFORE we ship it.
+      # The v1.0.2 failure was a double length-prefixed string pool that
+      # only showed up as a crash on device. Fail the build instead.
+      # --------------------------------------------------------------
+      - name: Validate resources.arsc string pool
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct, sys
+
+          data = open('/tmp/pre.arsc', 'rb').read()
+          off = 12
+          typ, hdr, size = struct.unpack_from('<HHI', data, off)
+          cnt, styc, flags, sstart = struct.unpack_from('<IIII', data, off + 8)
+          utf8 = (flags & 0x100) != 0
+          print(f"global pool: count={cnt} utf8={utf8}")
+          base = off + hdr + cnt * 4
+          bad = 0
+          for i in range(cnt):
+              o = struct.unpack_from('<I', data, off + hdr + i * 4)[0]
+              p = base + o
+              if utf8:
+                  u1 = data[p]
+                  n = u1 if u1 < 0x80 else ((u1 & 0x7f) << 8) | data[p + 1]
+                  p += 1 if u1 < 0x80 else 2
+                  s = data[p:p + n].decode('utf-8', 'replace')
+              else:
+                  n = struct.unpack_from('<H', data, p)[0]
+                  s = data[p + 2:p + 2 + n * 2].decode('utf-16-le', 'replace')
+              ok = '\x00' not in s and all(c.isprintable() for c in s) and len(s) > 0
+              if not ok:
+                  bad += 1
+              print(f"  [{i}] {s!r} {'OK' if ok else 'BAD'}")
+          if bad:
+              print(f"\n{bad} malformed string(s) in resources.arsc")
+              sys.exit(1)
+          print("\nresources.arsc string pool is well-formed")
+          PY
 
       - name: Compile Java and dex
         run: |
           set -euo pipefail
-          BT="$android_sdk/build-tools/34.0.0"
           mkdir -p /tmp/classes /tmp/dex
           javac -source 8 -target 8 \
-            -bootclasspath "$android_sdk/platforms/android-34/android.jar" \
+            -bootclasspath "$android_jar" \
             -classpath "libs/browser.jar" \
             -d /tmp/classes \
             -Xlint:-options \
             $(find src /tmp/gen -name '*.java')
-          "$BT/d8" --min-api 23 --lib "$android_sdk/platforms/android-34/android.jar" \
+          "$build_tools/d8" --min-api 23 --lib "$android_jar" \
             --output /tmp/dex \
             $(find /tmp/classes -name '*.class') libs/browser.jar
-          cd /tmp/dex && zip -q -X /tmp/base.apk classes.dex
-          echo "--- APK contents ---"
-          unzip -l /tmp/base.apk | tail -20
+          ( cd /tmp/dex && zip -q -X /tmp/base.apk classes.dex )
+          unzip -l /tmp/base.apk
 
       - name: Zipalign and sign
         run: |
           set -euo pipefail
-          BT="$android_sdk/build-tools/34.0.0"
-          keytool -genkeypair -v -keystore /tmp/ks.jks -storepass android \
+          keytool -genkeypair -keystore /tmp/ks.jks -storepass android \
             -keypass android -alias shell -keyalg RSA -keysize 2048 \
             -validity 10000 -dname "CN=Gemini Shell, O=local, C=DZ"
-          "$BT/zipalign" -f -p 4 /tmp/base.apk /tmp/aligned.apk
-          "$BT/apksigner" sign --ks /tmp/ks.jks --ks-pass pass:android \
+          "$build_tools/zipalign" -f -p 4 /tmp/base.apk /tmp/aligned.apk
+          "$build_tools/apksigner" sign --ks /tmp/ks.jks --ks-pass pass:android \
             --key-pass pass:android --out /tmp/gemini-shell.apk /tmp/aligned.apk
-          "$BT/apksigner" verify --print-certs /tmp/gemini-shell.apk
+          "$build_tools/apksigner" verify --print-certs /tmp/gemini-shell.apk
+          sha256sum /tmp/gemini-shell.apk
           ls -la /tmp/gemini-shell.apk
-          echo "apk_path=/tmp/gemini-shell.apk" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
