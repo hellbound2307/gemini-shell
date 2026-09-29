@@ -23,11 +23,17 @@ import os
 import sys
 
 TYPES = {'int', 'string', 'color', 'dimen', 'bool', 'integer', 'style', 'array',
-         'attr', 'id', 'layout', 'drawable', 'plurals', 'fraction'}
+         'attr', 'id', 'layout', 'drawable', 'plurals', 'fraction', 'styleable'}
 
 
 def read_closure(libsdir):
-    """artifact -> package, from the manifest fetch_deps.py wrote."""
+    """artifact -> package, from the manifest fetch_deps.py wrote.
+
+    The package is not the group id. androidx.lifecycle:lifecycle-runtime
+    generates R into androidx.lifecycle.runtime, and androidx.concurrent:
+    concurrent-futures into androidx.concurrent.futures. Rule: if the artifact
+    id starts with the last segment of the group, the remainder is appended.
+    """
     path = os.path.join(libsdir, 'closure.txt')
     if not os.path.exists(path):
         sys.stderr.write('no %s - run tools/fetch_deps.py first\n' % path)
@@ -39,7 +45,23 @@ def read_closure(libsdir):
             if not line:
                 continue
             g, a, _v = line.split(':')
-            out[a] = g.replace('-', '.')
+            last = g.split('.')[-1]
+            if a.startswith(last) and len(a) > len(last):
+                a = a[len(last) + 1:]
+            out[a if a else g] = g
+    # rebuild as artifact -> package, keeping the original artifact key
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            g, a, _v = line.split(':')
+            last = g.split('.')[-1]
+            pkg = g
+            if a.startswith(last) and len(a) > len(last):
+                pkg = g + '.' + a[len(last) + 1:].replace('-', '.')
+            out[a] = pkg
     return out
 
 
@@ -60,13 +82,18 @@ def main(argv):
         fields = {}
         with open(rtxt) as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 parts = line.split()
-                if len(parts) != 4:
+                if parts[0] in ('}', '{'):
                     continue
-                kind, name = parts[1], parts[2]
-                if kind not in TYPES:
-                    continue
-                fields.setdefault(kind, []).append(name)
+                # "int styleable Foo = 0"      -> R$styleable.Foo
+                # "int[] styleable FooBar { 0x.. }" -> R$styleable.FooBar
+                if parts[0] in ('int', 'int[]') and len(parts) >= 4:
+                    kind, name = parts[1], parts[2]
+                    if kind in TYPES:
+                        fields.setdefault(kind, []).append(name)
 
         dest_dir = os.path.join(outdir, *pkg.split('.'))
         os.makedirs(dest_dir, exist_ok=True)

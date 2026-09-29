@@ -127,13 +127,26 @@ def strip_array(desc):
 
 def unresolved_types(blob):
     referenced, defined = dex_type_closure(blob)
+    # Membership must be tested on the ELEMENT type. An array descriptor such
+    # as [[Landroidx/core/util/Pair; is a type reference but never appears in
+    # class_defs, so a plain `t in defined` test reports every array of a class
+    # that IS in the dex as unresolved. That produced 20 false positives on the
+    # first run of this gate and would have sent me hunting for a phantom bug.
+    defined_names = set()
+    for d in defined:
+        defined_names.add(d)
+        if d.startswith('L') and d.endswith(';'):
+            defined_names.add(d[1:-1])
+
     out = set()
     for t in referenced:
-        if t in defined:
+        if t in defined_names:
             continue
         norm = strip_array(t)
         if not norm or '/' not in norm:
             continue                       # primitive or non-class type
+        if norm in defined_names:
+            continue                       # array of a class we do define
         if norm.startswith(PLATFORM_PREFIXES):
             continue
         if norm.startswith(COMPILE_ONLY_PREFIXES):
